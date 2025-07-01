@@ -2,6 +2,7 @@
   "name": "@kan/web",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@9.14.2",
   "type": "module",
   "scripts": {
     "build": "pnpm with-env next build",
