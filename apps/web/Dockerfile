@@ -48,8 +48,8 @@ COPY --from=pruner /app/out/pnpm-workspace.yaml ./pnpm-workspace.yaml
 COPY --from=pruner /app/out/json/ .
 
 # First install the dependencies (as they change less often)
-RUN pnpm install --frozen-lockfile
-
+RUN --mount=type=cache,id=pnpm,target=~/.pnpm-store pnpm install --frozen-lockfile
+ 
 # Copy source code of isolated subworkspace
 COPY --from=pruner /app/out/full/ .
 
