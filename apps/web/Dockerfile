@@ -1,32 +1,85 @@
-# Use official Node.js LTS image
-FROM node:20
+ARG NODE_VERSION=20
+ARG APP_DIRNAME=web
+ARG PROJECT=@kan/web
 
-# Install pnpm and turbo globally
-RUN npm install -g pnpm@9.14.2 turbo@2.3.1
+# 1. Alpine image
+FROM node:${NODE_VERSION}-alpine AS alpine
+RUN apk update
+RUN apk add --no-cache libc6-compat python3 make g++
 
-# Set workdir to monorepo root
-WORKDIR /app
+# Setup pnpm and turbo on the alpine base
+FROM alpine AS base
+RUN corepack enable
+# Replace <your-major-version> with the major version installed in your repository. For example:
+# RUN npm install turbo@2.1.3 --global
+RUN npm install turbo@2.3.1 --global
 
-# Copy everything
-COPY . .
-
-# Set up pnpm config (optional)
 RUN pnpm config set store-dir ~/.pnpm-store
 
-# Install dependencies for entire monorepo
-RUN pnpm install --frozen-lockfile
+# 2. Prune projects
+FROM base AS pruner
+# https://stackoverflow.com/questions/49681984/how-to-get-version-value-of-package-json-inside-of-dockerfile
+# RUN export VERSION=$(npm run version)
 
-# Turbo prune (optional: keeps only necessary packages, fastest and smallest images)
-RUN turbo prune --scope=@kan/web --scope=@kan/db --docker
+ARG PROJECT
 
-# Build the web app
-RUN pnpm --filter @kan/web build
+# Set working directory
+WORKDIR /app
 
-# Set working directory to web app for runtime
-WORKDIR /app/apps/web
+# It might be the path to <ROOT> turborepo
+COPY . .
+ 
+# Generate a partial monorepo with a pruned lockfile for a target workspace.
+# Assuming "@acme/nextjs" is the name entered in the project's package.json: { name: "@acme/nextjs" }
+RUN turbo prune --scope=${PROJECT} --scope=@kan/db --docker
+ 
+# 3. Build the project
+FROM base AS builder
+ARG PROJECT
 
-# Expose port 3000
-EXPOSE 3000
+# Environment to skip .env validation on build
+ENV CI=true
 
-# Start the app
-CMD ["pnpm", "start"]
+WORKDIR /app
+
+# Copy lockfile and package.json's of isolated subworkspace
+COPY --from=pruner /app/out/pnpm-lock.yaml ./pnpm-lock.yaml
+COPY --from=pruner /app/out/pnpm-workspace.yaml ./pnpm-workspace.yaml
+COPY --from=pruner /app/out/json/ .
+
+# First install the dependencies (as they change less often)
+RUN --mount=type=cache,id=pnpm,target=~/.pnpm-store pnpm install --frozen-lockfile
+ 
+# Copy source code of isolated subworkspace
+COPY --from=pruner /app/out/full/ .
+
+
+RUN pnpm build --filter=${PROJECT}
+
+# # Copy static files to standalone directory
+# RUN mkdir -p apps/web/.next/standalone/.next && \
+# mv apps/web/public apps/web/.next/standalone/ && \
+# mv apps/web/.next/static apps/web/.next/standalone/.next/
+
+# 4. Final image - runner stage to run the application
+FROM base AS runner
+ARG APP_DIRNAME
+ 
+# Don't run production as root
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+USER nextjs
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+COPY --chown=nextjs:nodejs --from=builder /app/ ./
+WORKDIR /app/apps/${APP_DIRNAME}
+
+ARG PORT=3000
+ENV PORT=${PORT}
+EXPOSE ${PORT}
+
+CMD ["sh", "-c", "cd /app && pnpm db:migrate && cd /app/apps/web && pnpm start"]
+
